@@ -2,19 +2,228 @@
 import { useEffect, useRef, useState } from "react";
 import starterImgSrc from "../assets/starter.png";
 import { useCamera } from "../context/CameraContext";
-import InlineEditor from "./InlineEditor";
 
-import {
-  eraseAt,
-  getArrowEndpointHit,
-  hitTestElement,
-  isOnResizeHandle,
-  roundedRectPath,
-  screenToWorld,
-  snapPointToBoxes,
-  stripLatexDelimiters,
-  withArrowBounds,
-} from "../utils/canvasGeometry";
+// ---------- Helpers ----------
+
+// screen -> world
+function screenToWorld(sx, sy, camera, viewportWidth, viewportHeight) {
+  const wx = (sx - viewportWidth / 2) / camera.zoom + camera.x;
+  const wy = (sy - viewportHeight / 2) / camera.zoom + camera.y;
+  return { wx, wy };
+}
+
+// world -> screen
+function worldToScreen(wx, wy, camera, viewportWidth, viewportHeight) {
+  const sx = (wx - camera.x) * camera.zoom + viewportWidth / 2;
+  const sy = (wy - camera.y) * camera.zoom + viewportHeight / 2;
+  return { sx, sy };
+}
+
+// simple eraser
+function eraseAt(strokes, wx, wy, radius) {
+  const r2 = radius * radius;
+  return strokes.filter((stroke) => {
+    if (!stroke.points || stroke.points.length === 0) return true;
+    const hit = stroke.points.some((p) => {
+      const dx = p.x - wx;
+      const dy = p.y - wy;
+      return dx * dx + dy * dy <= r2;
+    });
+    return !hit;
+  });
+}
+
+// strip $$ ... $$ for display
+function stripLatexDelimiters(label = "") {
+  if (label.startsWith("$$") && label.endsWith("$$") && label.length >= 4) {
+    return label.slice(2, -2).trim();
+  }
+  return label;
+}
+
+// word-wrap a string into multiple lines that fit within maxWidth (in px)
+function wrapText(ctx, text, maxWidthPx) {
+  if (!text) return [""];
+  const words = text.split(/\s+/);
+  const lines = [];
+  let currentLine = "";
+
+  for (const word of words) {
+    const testLine = currentLine ? currentLine + " " + word : word;
+    const { width } = ctx.measureText(testLine);
+    if (width > maxWidthPx && currentLine) {
+      lines.push(currentLine);
+      currentLine = word;
+    } else {
+      currentLine = testLine;
+    }
+  }
+
+  if (currentLine) lines.push(currentLine);
+  return lines;
+}
+
+// rounded rectangle helper
+function roundedRectPath(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
+  const right = x + w;
+  const bottom = y + h;
+
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(right - radius, y);
+  ctx.quadraticCurveTo(right, y, right, y + radius);
+  ctx.lineTo(right, bottom - radius);
+  ctx.quadraticCurveTo(right, bottom, right - radius, bottom);
+  ctx.lineTo(x + radius, bottom);
+  ctx.quadraticCurveTo(x, bottom, x, bottom - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+// resize handle hit test
+function isOnResizeHandle(el, wx, wy, radius = 12) {
+  const hx = el.x + el.w;
+  const hy = el.y + el.h;
+  const dx = wx - hx;
+  const dy = wy - hy;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
+// distance from point to segment squared (for arrow hit testing)
+function pointToSegmentDist2(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return (px - x1) ** 2 + (py - y1) ** 2;
+  let t = ((px - x1) * dx + (py - y1) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const projX = x1 + t * dx;
+  const projY = y1 + t * dy;
+  const ddx = px - projX;
+  const ddy = py - projY;
+  return ddx * ddx + ddy * ddy;
+}
+
+// generic element hit test
+function hitTestElement(el, wx, wy) {
+  if (el.type === "arrow") {
+    const margin = 8;
+    const x1 = el.x1 ?? el.x;
+    const y1 = el.y1 ?? el.y;
+    const x2 = el.x2 ?? el.x + el.w;
+    const y2 = el.y2 ?? el.y + el.h;
+
+    // quick bounding box check
+    const minX = Math.min(x1, x2) - margin;
+    const maxX = Math.max(x1, x2) + margin;
+    const minY = Math.min(y1, y2) - margin;
+    const maxY = Math.max(y1, y2) + margin;
+    if (wx < minX || wx > maxX || wy < minY || wy > maxY) return false;
+
+    // distance to line segment
+    const dist2 = pointToSegmentDist2(wx, wy, x1, y1, x2, y2);
+    return dist2 <= margin * margin;
+  }
+
+  // box / latex / text / paragraph
+  return wx >= el.x && wx <= el.x + el.w && wy >= el.y && wy <= el.y + el.h;
+}
+
+// arrow endpoint hit test
+function getArrowEndpointHit(el, wx, wy, radius = 12) {
+  const x1 = el.x1 ?? el.x;
+  const y1 = el.y1 ?? el.y;
+  const x2 = el.x2 ?? el.x + el.w;
+  const y2 = el.y2 ?? el.y + el.h;
+
+  const r2 = radius * radius;
+
+  const dx1 = wx - x1;
+  const dy1 = wy - y1;
+  if (dx1 * dx1 + dy1 * dy1 <= r2) return "start";
+
+  const dx2 = wx - x2;
+  const dy2 = wy - y2;
+  if (dx2 * dx2 + dy2 * dy2 <= r2) return "end";
+
+  return null;
+}
+
+// keep arrow's bounding box in sync with endpoints
+function withArrowBounds(el) {
+  if (el.type !== "arrow") return el;
+  const x1 = el.x1 ?? el.x;
+  const y1 = el.y1 ?? el.y;
+  const x2 = el.x2 ?? el.x + el.w;
+  const y2 = el.y2 ?? el.y + el.h;
+
+  const minX = Math.min(x1, x2);
+  const maxX = Math.max(x1, x2);
+  const minY = Math.min(y1, y2);
+  const maxY = Math.max(y1, y2);
+
+  return {
+    ...el,
+    x: minX,
+    y: minY,
+    w: maxX - minX,
+    h: maxY - minY,
+    x1,
+    y1,
+    x2,
+    y2,
+  };
+}
+
+// ---------- SNAP HELPERS ----------
+
+// all snap points for a box/latex
+function getBoxSnapPoints(el) {
+  const x = el.x;
+  const y = el.y;
+  const w = el.w;
+  const h = el.h;
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+
+  return [
+    { x: cx, y: cy }, // center
+    { x, y }, // tl
+    { x: x + w, y }, // tr
+    { x, y: y + h }, // bl
+    { x: x + w, y: y + h }, // br
+    { x: cx, y }, // top mid
+    { x: cx, y: y + h }, // bottom mid
+    { x, y: cy }, // left mid
+    { x: x + w, y: cy }, // right mid
+  ];
+}
+
+// find nearest snap point for (wx, wy) given all boxes
+function snapPointToBoxes(wx, wy, elements, selfId, threshold = 20) {
+  let best = null;
+  let bestDist2 = threshold * threshold;
+
+  elements.forEach((el) => {
+    if (el.id === selfId) return;
+    if (el.type === "arrow") return;
+    const points = getBoxSnapPoints(el);
+    points.forEach((p) => {
+      const dx = wx - p.x;
+      const dy = wy - p.y;
+      const dist2 = dx * dx + dy * dy;
+      if (dist2 <= bestDist2) {
+        bestDist2 = dist2;
+        best = { x: p.x, y: p.y };
+      }
+    });
+  });
+
+  if (best) return best;
+  return { x: wx, y: wy };
+}
 
 export default function ScreenCanvas({
   mode, // "pan" | "draw" | "erase"
@@ -81,7 +290,6 @@ export default function ScreenCanvas({
   }, [editing?.id]);
 
   // ---------- render loop ----------
-
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -107,14 +315,14 @@ export default function ScreenCanvas({
     // background image in world space
     if (starterImage) {
       const imgW = 800;
-      const imgH = 800;
+      const imgH = 600;
       const imgX = -imgW / 2;
       const imgY = -imgH / 2;
       ctx.drawImage(starterImage, imgX, imgY, imgW, imgH);
     }
 
     // components
-    ctx.font = `${16 / camera.zoom}px "angela"`;
+    ctx.font = `${16 / camera.zoom}px "angela", system-ui, sans-serif`;
 
     elements.forEach((rawEl) => {
       const el = rawEl.type === "arrow" ? withArrowBounds(rawEl) : rawEl;
@@ -172,68 +380,122 @@ export default function ScreenCanvas({
         return;
       }
 
-      // box / latex – rounded rect + centered, clipped text
+      // ----- non-arrow: box / latex / text / paragraph -----
       const isLatex = type === "latex";
+      const isHeading = type === "text";
+      const isParagraph = type === "paragraph";
+      const isPlainBox = type === "box";
 
-      ctx.fillStyle = "#020617";
-      ctx.strokeStyle = isSelected ? "#facc15" : "#4b5563";
-      ctx.lineWidth = 2 / camera.zoom;
-
-      // 1) draw rounded rect
-      roundedRectPath(ctx, el.x, el.y, el.w, el.h, 12);
-
-      // 2) fill + stroke
-      ctx.fill();
-      ctx.stroke();
-
-      // 3) clip to this rounded rect so text can't escape
-      ctx.save();
-      roundedRectPath(ctx, el.x, el.y, el.w, el.h, 12);
-      ctx.clip();
-
-      // 4) centered text (with support for multiple lines)
-      ctx.fillStyle = "#e5e7eb";
-      let text = el.label || "";
-      if (isLatex) text = stripLatexDelimiters(text) || "LaTeX";
-
-      const cx = el.x + el.w / 2;
-      const cy = el.y + el.h / 2;
-      const lines = text.split("\n");
-      const lineHeight = 18 / camera.zoom;
-
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-
-      lines.forEach((line, i) => {
-        const offset = (i - (lines.length - 1) / 2) * lineHeight;
-        ctx.fillText(line, cx, cy + offset);
-      });
-
-      ctx.restore();
-
-      // restore defaults for safety
-      ctx.textAlign = "left";
-      ctx.textBaseline = "alphabetic";
-
-      // resize handle
-      if (isSelected) {
-        const handleSize = 7 / camera.zoom;
-        const hx = el.x + el.w;
-        const hy = el.y + el.h;
-
-        ctx.fillStyle = "#facc15";
-        ctx.strokeStyle = "#0f172a";
+      // LaTeX: keep rounded box + clipping
+      if (isLatex) {
+        ctx.fillStyle = "#020617";
+        ctx.strokeStyle = isSelected ? "#facc15" : "#4b5563";
         ctx.lineWidth = 2 / camera.zoom;
 
-        ctx.beginPath();
-        ctx.rect(
-          hx - handleSize,
-          hy - handleSize,
-          handleSize * 2,
-          handleSize * 2
-        );
+        roundedRectPath(ctx, el.x, el.y, el.w, el.h, 12);
         ctx.fill();
         ctx.stroke();
+
+        ctx.save();
+        roundedRectPath(ctx, el.x, el.y, el.w, el.h, 12);
+        ctx.clip();
+
+        const baseFontSize = 18;
+        ctx.font = `${baseFontSize}px "angela", system-ui, sans-serif`;
+        ctx.fillStyle = "#e5e7eb";
+
+        let text = stripLatexDelimiters(el.label || "") || "LaTeX";
+
+        const paddingPx = 16;
+        const availableWidthPx = Math.max(
+          0,
+          el.w * camera.zoom - paddingPx * 2
+        );
+        const lineHeight = baseFontSize + 4;
+
+        let lines = [text];
+        if (availableWidthPx > 0 && text) {
+          const paragraphs = text.split("\n");
+          lines = paragraphs.flatMap((para) =>
+            wrapText(ctx, para, availableWidthPx)
+          );
+        }
+
+        const cx = el.x + el.w / 2;
+        const cy = el.y + el.h / 2;
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        const totalHeight = lines.length * lineHeight;
+        const startY = cy - totalHeight / 2 + lineHeight / 2;
+
+        lines.forEach((line, i) => {
+          const y = startY + i * lineHeight;
+          ctx.fillText(line, cx, y);
+        });
+
+        ctx.restore();
+
+        // selection handle
+        if (isSelected) {
+          const handleSize = 7 / camera.zoom;
+          const hx = el.x + el.w;
+          const hy = el.y + el.h;
+
+          ctx.fillStyle = "#facc15";
+          ctx.strokeStyle = "#0f172a";
+          ctx.lineWidth = 1 / camera.zoom;
+
+          ctx.beginPath();
+          ctx.rect(
+            hx - handleSize,
+            hy - handleSize,
+            handleSize * 2,
+            handleSize * 2
+          );
+          ctx.fill();
+          ctx.stroke();
+        }
+
+        return;
+      }
+
+      // Text-based blocks: box / paragraph / heading
+      let baseFontSize = 16;
+      if (isHeading) baseFontSize = 32; // 🔥 make header bigger
+      if (isParagraph) baseFontSize = 16;
+      if (isPlainBox) baseFontSize = 16;
+
+      ctx.font = `${baseFontSize}px "angela", system-ui, sans-serif`;
+      ctx.fillStyle = "#e5e7eb";
+
+      const paddingWorld = 8;
+      const startX = el.x + paddingWorld;
+      const startY = el.y + paddingWorld;
+
+      let text = el.label || "";
+      const lineHeight = baseFontSize + 4;
+
+      // ❌ no automatic word-wrap; just respect manual "\n"
+      const lines = text.split("\n");
+
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+
+      lines.forEach((line, i) => {
+        const y = startY + i * lineHeight;
+        ctx.fillText(line, startX, y);
+      });
+
+      // draw a dashed selection rectangle ONLY when selected
+      if (isSelected) {
+        ctx.save();
+        ctx.setLineDash([4 / camera.zoom, 4 / camera.zoom]);
+        ctx.strokeStyle = "#facc15";
+        ctx.lineWidth = 1.5 / camera.zoom;
+        ctx.strokeRect(el.x, el.y, el.w, el.h);
+        ctx.restore();
       }
     });
 
@@ -346,7 +608,7 @@ export default function ScreenCanvas({
         }
       }
 
-      // if selected box/latex, check resize handle
+      // if selected non-arrow, check resize handle
       if (selected && selected.type !== "arrow") {
         if (isOnResizeHandle(selected, wx, wy)) {
           resizeState.current = {
@@ -610,14 +872,30 @@ export default function ScreenCanvas({
           y2,
         };
       } else {
+        // choose default label per block type
+        let defaultLabel;
+        switch (key) {
+          case "latex":
+            defaultLabel = "$$x^2 + y^2$$";
+            break;
+          case "text":
+            defaultLabel = label || "Heading";
+            break;
+          case "paragraph":
+            defaultLabel = label || "Type your paragraph…";
+            break;
+          default:
+            defaultLabel = label || "Text";
+        }
+
         newElement = {
           id,
           x: wx - w / 2,
           y: wy - h / 2,
           w,
           h,
-          label: key === "latex" ? "$$x^2 + y^2$$" : label || "Box",
-          type: key, // "latex" | "box"
+          label: defaultLabel,
+          type: key, // "box" | "latex" | "text" | "paragraph"
         };
       }
 
@@ -656,7 +934,7 @@ export default function ScreenCanvas({
       viewport.height
     );
 
-    // double-click to edit box / latex text
+    // double-click to edit text-like elements
     const hit = elements
       .slice()
       .reverse()
@@ -664,7 +942,9 @@ export default function ScreenCanvas({
 
     if (hit) {
       const type = hit.type || "box";
-      if (type === "box" || type === "latex") {
+      const editableTypes = ["box", "latex", "text", "paragraph"];
+
+      if (editableTypes.includes(type)) {
         setEditing({
           id: hit.id,
           text: hit.label || "",
@@ -721,7 +1001,44 @@ export default function ScreenCanvas({
     });
   };
 
-  // ---------- editing helpers ----------
+  // ---------- input overlay positioning ----------
+
+  let editorStyle = null;
+  if (editing) {
+    const el = elements.find((e) => e.id === editing.id);
+    if (el) {
+      const { sx, sy } = worldToScreen(
+        el.x,
+        el.y,
+        camera,
+        viewport.width,
+        viewport.height
+      );
+      const sw = el.w * camera.zoom;
+      const sh = el.h * camera.zoom;
+
+      editorStyle = {
+        overflow: "auto",
+        position: "absolute",
+        left: sx,
+        top: sy,
+        width: sw,
+        height: sh,
+        fontSize: 14,
+        fontFamily: '"angela", system-ui, sans-serif',
+        padding: "6px 8px",
+        borderRadius: 8,
+        border: "1px solid #facc15",
+        background: "rgba(15,23,42,0.97)",
+        color: "#e5e7eb",
+        resize: "none",
+        outline: "none",
+        boxSizing: "border-box",
+        zIndex: 10,
+        textAlign: editing.type === "latex" ? "center" : "left",
+      };
+    }
+  }
 
   const commitEditing = () => {
     if (!editing) return;
@@ -732,11 +1049,15 @@ export default function ScreenCanvas({
     setEditing(null);
   };
 
-  const handleEditorTextChange = (text) => {
-    setEditing((prev) => (prev ? { ...prev, text } : prev));
+  const handleEditorKeyDown = (e) => {
+    // Enter commits; Shift+Enter for newline
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      commitEditing();
+    }
   };
 
-  // ---------- render ----------
+  // ---------- render container + canvas + editor ----------
 
   return (
     <div
@@ -781,15 +1102,20 @@ export default function ScreenCanvas({
         onWheel={handleWheel}
       />
 
-      <InlineEditor
-        editing={editing}
-        elements={elements}
-        camera={camera}
-        viewport={viewport}
-        editorRef={editorRef}
-        onChangeText={handleEditorTextChange}
-        onCommit={commitEditing}
-      />
+      {editing && editorStyle && (
+        <textarea
+          ref={editorRef}
+          style={editorStyle}
+          value={editing.text}
+          onChange={(e) =>
+            setEditing((prev) =>
+              prev ? { ...prev, text: e.target.value } : prev
+            )
+          }
+          onBlur={commitEditing}
+          onKeyDown={handleEditorKeyDown}
+        />
+      )}
     </div>
   );
 }

@@ -65,8 +65,10 @@ export default function SideBar({
   // === component library ===
   const componentTemplates = [
     { key: "latex", label: "LaTeX", w: 200, h: 80 },
-    { key: "arrow", label: "Arrow", w: 200, h: 0 }, // horizontal arrow
+    { key: "arrow", label: "Arrow", w: 200, h: 0 },
     { key: "box", label: "Box", w: 180, h: 100 },
+    { key: "text", label: "Heading", w: 320, h: 80 },
+    { key: "paragraph", label: "Paragraph", w: 360, h: 120 },
   ];
 
   const selectTemplate = (tpl) => {

@@ -4,8 +4,7 @@ import { useCamera } from "../context/CameraContext";
 export default function ToolBar({
   selectedId,
   onDeleteSelected,
-  mode,
-  setMode,
+  onClearBoard,
 }) {
   const { camera, setCamera } = useCamera();
 
@@ -67,6 +66,9 @@ export default function ToolBar({
         disabled={!selectedId}
       >
         Delete
+      </button>
+      <button onClick={onClearBoard} style={{ ...buttonBase, marginLeft: 8 }}>
+        Clear board
       </button>
     </div>
   );
