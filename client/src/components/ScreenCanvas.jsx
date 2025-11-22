@@ -223,7 +223,7 @@ export default function ScreenCanvas({
 
         ctx.fillStyle = "#facc15";
         ctx.strokeStyle = "#0f172a";
-        ctx.lineWidth = 1 / camera.zoom;
+        ctx.lineWidth = 2 / camera.zoom;
 
         ctx.beginPath();
         ctx.rect(
