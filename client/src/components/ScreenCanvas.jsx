@@ -547,15 +547,10 @@ export default function ScreenCanvas({
         if (!stroke.points || stroke.points.length < 2) return;
 
         const color = stroke.color || "#e5e7eb";
-
-        // Treat stroke.width as *screen* pixels.
-        // Since the context is already scaled by camera.zoom,
-        // we divide by zoom so that the visible width is constant.
-        const widthScreen = stroke.width || 2;
-        const effectiveWorldWidth = widthScreen / (camera.zoom || 1);
+        const widthWorld = stroke.width || 2;
 
         ctx.strokeStyle = color;
-        ctx.lineWidth = effectiveWorldWidth;
+        ctx.lineWidth = widthWorld;
 
         ctx.beginPath();
         const [first, ...rest] = stroke.points;

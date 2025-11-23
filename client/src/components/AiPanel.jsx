@@ -2,7 +2,7 @@
 import { useCallback, useState } from "react";
 
 const AI_STROKE_COLOR = "#ffffff"; // ✅ all AI strokes are white
-const MIN_ARROW_GAP = 100; // ✅ min arrow length & block spacing
+const MIN_ARROW_GAP = 100;
 const SIDE_PADDING = 32;
 
 function makeId() {
@@ -13,23 +13,22 @@ function makeId() {
 }
 
 /**
- * Roughly estimate the block size based on label length so
- * the width is only as wide as the text needs.
+ * Estimate how wide/tall a block should be based on its label & type.
+ * Used so blocks are only as wide as their text, but not tiny.
  */
 function estimateBlockSize(label, blockType, region) {
   const text =
     (typeof label === "string" ? label.trim() : "") ||
     (blockType === "text" ? "Heading" : "Text");
 
-  const approxCharWidth = 10; // heuristic
-  const basePadding = 32; // left + right
+  const approxCharWidth = 10;
+  const basePadding = 32;
   const minWidth = 140;
   const maxWidth = Math.max(minWidth, region.w * 0.8);
 
   const rawWidth = text.length * approxCharWidth + basePadding;
-  let w = Math.max(minWidth, Math.min(maxWidth, rawWidth));
+  const w = Math.max(minWidth, Math.min(maxWidth, rawWidth));
 
-  // estimate lines / height
   const charsPerLine = Math.max(12, Math.floor(w / approxCharWidth));
   const lines = Math.max(1, Math.ceil(text.length / charsPerLine));
   const lineHeight = blockType === "text" ? 28 : 22;
@@ -40,80 +39,102 @@ function estimateBlockSize(label, blockType, region) {
 }
 
 /**
- * Lay out blocks in a single row or column with at least MIN_ARROW_GAP
- * between them. We choose vertical layout if the region is too narrow.
+ * Lay out blocks in one or more "lanes" (timelines) inside aiRegion.
+ *
+ * Each add_block can optionally have:
+ *   lane: 0,1,2,...  (timeline index)
  *
  * Returns { placed, orientation }
- *  - placed: [{ index, op, x, y, w, h, blockType }]
- *  - orientation: "horizontal" | "vertical"
+ *   placed: [{ index, op, blockType, lane, x, y, w, h }]
+ *   orientation: "horizontal" | "vertical"
  */
 function layoutBlocksInRegion(blockOps, region) {
-  const innerWidth = region.w - SIDE_PADDING * 2;
-  const innerHeight = region.h - SIDE_PADDING * 2;
-
-  const prepared = blockOps.map((op, index) => {
-    const blockType = op.blockType === "text" ? "text" : "paragraph";
-    const { w, h } = estimateBlockSize(op.label, blockType, region);
-    return { index, op, blockType, w, h };
-  });
-
-  const n = prepared.length;
-  if (n === 0) {
+  if (!blockOps || blockOps.length === 0) {
     return { placed: [], orientation: "horizontal" };
   }
 
-  const totalWidthNeeded =
-    prepared.reduce((sum, b) => sum + b.w, 0) + MIN_ARROW_GAP * (n - 1);
-  const totalHeightNeeded =
-    prepared.reduce((sum, b) => sum + b.h, 0) + MIN_ARROW_GAP * (n - 1);
+  const innerWidth = region.w - SIDE_PADDING * 2;
+  const innerHeight = region.h - SIDE_PADDING * 2;
 
-  let orientation;
-  if (totalWidthNeeded <= innerWidth) {
-    // fits horizontally
-    orientation = "horizontal";
-  } else if (totalHeightNeeded <= innerHeight) {
-    // doesn't fit horizontally, but fits vertically
-    orientation = "vertical";
-  } else {
-    // neither fits perfectly; pick whichever dimension is larger
-    orientation = innerWidth >= innerHeight ? "horizontal" : "vertical";
-  }
+  // Group blocks by lane
+  const lanes = new Map(); // laneIndex -> array of prepared blocks
+
+  blockOps.forEach((op, index) => {
+    const blockType = op.blockType === "text" ? "text" : "paragraph";
+    const { w, h } = estimateBlockSize(op.label, blockType, region);
+
+    let lane = 0;
+    if (Number.isInteger(op.lane) && op.lane >= 0 && op.lane <= 16) {
+      lane = op.lane;
+    }
+
+    if (!lanes.has(lane)) lanes.set(lane, []);
+    lanes.get(lane).push({ index, op, blockType, lane, w, h });
+  });
+
+  const laneIndices = [...lanes.keys()].sort((a, b) => a - b);
+
+  // Decide orientation based on region aspect ratio
+  const aspect = innerWidth / Math.max(1, innerHeight);
+  const orientation = aspect >= 1 ? "horizontal" : "vertical";
 
   const placed = [];
 
   if (orientation === "horizontal") {
-    const centerY = region.y + region.h / 2;
-    let x = region.x + SIDE_PADDING;
+    // lanes = rows
+    const startX = region.x + SIDE_PADDING;
+    const top = region.y + SIDE_PADDING;
+    const availableHeight = Math.max(1, innerHeight);
+    const laneCount = laneIndices.length;
+    const laneGapY = laneCount > 1 ? availableHeight / (laneCount - 1) : 0;
 
-    prepared.forEach((b) => {
-      const y = centerY - b.h / 2;
-      placed.push({
-        index: b.index,
-        op: b.op,
-        blockType: b.blockType,
-        x,
-        y,
-        w: b.w,
-        h: b.h,
+    laneIndices.forEach((laneKey, laneIdx) => {
+      const laneBlocks = lanes.get(laneKey) || [];
+      const centerY = top + laneGapY * laneIdx;
+
+      let x = startX;
+      laneBlocks.forEach((b) => {
+        const y = centerY - b.h / 2;
+        placed.push({
+          index: b.index,
+          op: b.op,
+          blockType: b.blockType,
+          lane: b.lane,
+          x,
+          y,
+          w: b.w,
+          h: b.h,
+        });
+        x += b.w + MIN_ARROW_GAP; // 👈 ensures ≥100px between same-lane blocks
       });
-      x += b.w + MIN_ARROW_GAP;
     });
   } else {
-    const centerX = region.x + region.w / 2;
-    let y = region.y + SIDE_PADDING;
+    // lanes = columns
+    const startY = region.y + SIDE_PADDING;
+    const left = region.x + SIDE_PADDING;
+    const availableWidth = Math.max(1, innerWidth);
+    const laneCount = laneIndices.length;
+    const laneGapX = laneCount > 1 ? availableWidth / (laneCount - 1) : 0;
 
-    prepared.forEach((b) => {
-      const x = centerX - b.w / 2;
-      placed.push({
-        index: b.index,
-        op: b.op,
-        blockType: b.blockType,
-        x,
-        y,
-        w: b.w,
-        h: b.h,
+    laneIndices.forEach((laneKey, laneIdx) => {
+      const laneBlocks = lanes.get(laneKey) || [];
+      const centerX = left + laneGapX * laneIdx;
+
+      let y = startY;
+      laneBlocks.forEach((b) => {
+        const x = centerX - b.w / 2;
+        placed.push({
+          index: b.index,
+          op: b.op,
+          blockType: b.blockType,
+          lane: b.lane,
+          x,
+          y,
+          w: b.w,
+          h: b.h,
+        });
+        y += b.h + MIN_ARROW_GAP;
       });
-      y += b.h + MIN_ARROW_GAP;
     });
   }
 
@@ -121,97 +142,104 @@ function layoutBlocksInRegion(blockOps, region) {
 }
 
 /**
+ * Helper: corners of a block (tl, tr, bl, br)
+ */
+function getCorners(el) {
+  return [
+    { x: el.x, y: el.y }, // top-left
+    { x: el.x + el.w, y: el.y }, // top-right
+    { x: el.x, y: el.y + el.h }, // bottom-left
+    { x: el.x + el.w, y: el.y + el.h }, // bottom-right
+  ];
+}
+
+/**
  * Build an arrow element between two blocks.
- * - Horizontal: centers on Y, at least MIN_ARROW_GAP long.
- * - Vertical:   centers on X, at least MIN_ARROW_GAP long.
+ *
+ * - If blocks are in the same lane:
+ *    - horizontal orientation: left→right, centered on Y
+ *    - vertical orientation:   top→bottom, centered on X
+ * - If blocks are in different lanes:
+ *    - connect the pair of corners (one from each block) with MIN distance
  */
 function buildArrowElement(fromEl, toEl, orientation) {
-  if (!fromEl || !toEl) return null;
+  const fromMidX = fromEl.x + fromEl.w / 2;
+  const fromMidY = fromEl.y + fromEl.h / 2;
+  const toMidX = toEl.x + toEl.w / 2;
+  const toMidY = toEl.y + toEl.h / 2;
 
-  const fromCx = fromEl.x + fromEl.w / 2;
-  const fromCy = fromEl.y + fromEl.h / 2;
-  const toCx = toEl.x + toEl.w / 2;
-  const toCy = toEl.y + toEl.h / 2;
+  const sameLane =
+    typeof fromEl.lane === "number" &&
+    typeof toEl.lane === "number" &&
+    fromEl.lane === toEl.lane;
 
-  if (orientation === "vertical") {
-    // Center X, arrow running up/down
-    const dir = toCy >= fromCy ? 1 : -1; // down or up
-    const centerX = (fromCx + toCx) / 2;
+  let x1, y1, x2, y2;
 
-    const rawStartY = dir > 0 ? fromEl.y + fromEl.h : fromEl.y;
-    const rawEndY = dir > 0 ? toEl.y : toEl.y + toEl.h;
-
-    let y1 = rawStartY + dir * 8; // a bit away from the box edge
-    let y2 = rawEndY - dir * 8;
-
-    let length = Math.abs(y2 - y1);
-    if (length < MIN_ARROW_GAP) {
-      const extra = (MIN_ARROW_GAP - length) / 2;
-      y1 -= dir * extra;
-      y2 += dir * extra;
-      length = Math.abs(y2 - y1);
+  if (sameLane) {
+    if (orientation === "horizontal") {
+      // arrow along the row – center Y
+      const fromRight = fromEl.x + fromEl.w;
+      const toLeft = toEl.x;
+      const midY = (fromMidY + toMidY) / 2;
+      x1 = fromRight + 16;
+      x2 = toLeft - 16;
+      y1 = midY;
+      y2 = midY;
+    } else {
+      // arrow along the column – center X
+      const fromBottom = fromEl.y + fromEl.h;
+      const toTop = toEl.y;
+      const midX = (fromMidX + toMidX) / 2;
+      y1 = fromBottom + 16;
+      y2 = toTop - 16;
+      x1 = midX;
+      x2 = midX;
     }
-
-    const x1 = centerX;
-    const x2 = centerX;
-
-    const minX = Math.min(x1, x2);
-    const maxX = Math.max(x1, x2);
-    const minY = Math.min(y1, y2);
-    const maxY = Math.max(y1, y2);
-
-    return {
-      id: makeId(),
-      type: "arrow",
-      x: minX,
-      y: minY,
-      w: maxX - minX,
-      h: maxY - minY,
-      x1,
-      y1,
-      x2,
-      y2,
-    };
   } else {
-    // Horizontal: center Y, arrow running left/right
-    const dir = toCx >= fromCx ? 1 : -1; // right or left
-    const centerY = (fromCy + toCy) / 2;
+    // 🔁 Cross-lane arrow: connect the closest pair of corners
+    const fromCorners = getCorners(fromEl);
+    const toCorners = getCorners(toEl);
 
-    const rawStartX = dir > 0 ? fromEl.x + fromEl.w : fromEl.x;
-    const rawEndX = dir > 0 ? toEl.x : toEl.x + toEl.w;
+    let bestFrom = fromCorners[0];
+    let bestTo = toCorners[0];
+    let bestDist2 = Infinity;
 
-    let x1 = rawStartX + dir * 8;
-    let x2 = rawEndX - dir * 8;
+    fromCorners.forEach((fc) => {
+      toCorners.forEach((tc) => {
+        const dx = fc.x - tc.x;
+        const dy = fc.y - tc.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestDist2) {
+          bestDist2 = d2;
+          bestFrom = fc;
+          bestTo = tc;
+        }
+      });
+    });
 
-    let length = Math.abs(x2 - x1);
-    if (length < MIN_ARROW_GAP) {
-      const extra = (MIN_ARROW_GAP - length) / 2;
-      x1 -= dir * extra;
-      x2 += dir * extra;
-      length = Math.abs(x2 - x1);
-    }
-
-    const y1 = centerY;
-    const y2 = centerY;
-
-    const minX = Math.min(x1, x2);
-    const maxX = Math.max(x1, x2);
-    const minY = Math.min(y1, y2);
-    const maxY = Math.max(y1, y2);
-
-    return {
-      id: makeId(),
-      type: "arrow",
-      x: minX,
-      y: minY,
-      w: maxX - minX,
-      h: maxY - minY,
-      x1,
-      y1,
-      x2,
-      y2,
-    };
+    x1 = bestFrom.x;
+    y1 = bestFrom.y;
+    x2 = bestTo.x;
+    y2 = bestTo.y;
   }
+
+  const minX = Math.min(x1, x2);
+  const maxX = Math.max(x1, x2);
+  const minY = Math.min(y1, y2);
+  const maxY = Math.max(y1, y2);
+
+  return {
+    id: makeId(),
+    type: "arrow",
+    x: minX,
+    y: minY,
+    w: maxX - minX,
+    h: maxY - minY,
+    x1,
+    y1,
+    x2,
+    y2,
+  };
 }
 
 /**
@@ -273,24 +301,24 @@ export default function AiPanel({
       const data = await res.json();
       const operations = Array.isArray(data.operations) ? data.operations : [];
 
-      // 2) split operations by type
+      // split by type
       const blockOps = operations.filter((op) => op && op.op === "add_block");
       const arrowOps = operations.filter((op) => op && op.op === "add_arrow");
       const strokePathOps = operations.filter(
         (op) => op && op.op === "add_stroke_path"
       );
 
-      // 3) layout blocks inside aiRegion with NO OVERLAP, respecting MIN_ARROW_GAP
+      // 2) layout blocks inside aiRegion with NO OVERLAP
       const { placed, orientation } = layoutBlocksInRegion(blockOps, aiRegion);
 
       const newBlockElements = placed.map(
-        ({ index, op, x, y, w, h, blockType }) => {
+        ({ index, op, x, y, w, h, blockType, lane }) => {
           const id = makeId();
 
           let type;
           if (blockType === "text") type = "text";
           else if (blockType === "paragraph") type = "paragraph";
-          else type = "box";
+          else type = "box"; // fallback
 
           let label = typeof op.label === "string" ? op.label.trim() : "";
           if (!label) {
@@ -299,6 +327,9 @@ export default function AiPanel({
             else if (type === "paragraph") label = "Type your paragraph…";
             else label = "Text";
           }
+
+          const role =
+            typeof op.role === "string" ? op.role.toLowerCase() : "normal";
 
           return {
             id,
@@ -309,15 +340,16 @@ export default function AiPanel({
             w,
             h,
             label,
+            lane,
+            role, // optional semantic info (start/end/normal)
           };
         }
       );
 
-      // helper to find element by block index
       const findBlockByIndex = (idx) =>
         newBlockElements.find((el) => el.blockIndex === idx);
 
-      // 4) build arrows from block indices, using layout orientation
+      // 3) build arrows (including cross-lane with corner-corner)
       const newArrowElements = arrowOps
         .map((op) => {
           const fromIdx = op.from;
@@ -325,7 +357,6 @@ export default function AiPanel({
           if (typeof fromIdx !== "number" || typeof toIdx !== "number") {
             return null;
           }
-
           const fromEl = findBlockByIndex(fromIdx);
           const toEl = findBlockByIndex(toIdx);
           if (!fromEl || !toEl) return null;
@@ -334,7 +365,7 @@ export default function AiPanel({
         })
         .filter(Boolean);
 
-      // 5) convert stroke paths to canvas strokes (forced to white)
+      // 4) convert stroke paths to canvas strokes (forced to white)
       const newStrokesFromPaths = strokePathOps
         .map((op) => {
           const pts = mapStrokePathToWorld(op.points, aiRegion);
@@ -352,7 +383,7 @@ export default function AiPanel({
         })
         .filter(Boolean);
 
-      // 6) update board
+      // 5) update board
       setElements((prev) => [
         ...prev,
         ...newBlockElements,

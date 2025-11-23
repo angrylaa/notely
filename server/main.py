@@ -235,6 +235,7 @@ def _parse_operations(text: str) -> List[dict]:
 def _build_system_instructions(user_prompt: str) -> str:
   """
   Describe the JSON drawing DSL to Gemini, with a precise, minimal schema.
+  Now supports multiple timelines (lanes) and start/end roles.
   """
   return f"""
 You are an AI diagram and doodle assistant for a zoomable canvas.
@@ -242,6 +243,7 @@ You are an AI diagram and doodle assistant for a zoomable canvas.
 The user has selected a rectangular "AI Region" and given this prompt:
 
 \"\"\"{user_prompt}\"\"\"
+
 
 You must RETURN ONLY JSON in this exact top-level shape:
 
@@ -253,30 +255,46 @@ No prose, no comments, no explanations. Just that JSON object.
 
 Each Operation is one of the following forms.
 
-1) Add a text/paragraph block
---------------------------------
+1) Add a text/paragraph block (node)
+-------------------------------------
 
 {{
   "op": "add_block",
   "blockType": "text" | "paragraph",
+
+  // label for the node (keep SHORT)
   "label": "short label (1-6 words, <= 60 chars, no newlines)",
-  "x": 0.1,   // left position, normalized in [0,1] inside the region
-  "y": 0.1,   // top position, normalized in [0,1]
-  "w": 0.4,   // width fraction of region width in [0,1]
-  "h": 0.25  // height fraction of region height in [0,1]
+
+  // OPTIONAL: which timeline / swimlane this node belongs to.
+  // Use small non-negative integers (0, 1, 2, ...).
+  // All nodes with the same lane are laid out along the same row or column.
+  "lane": 0,
+
+  // OPTIONAL: the semantic role of this node in its lane
+  // (used by the client to highlight or interpret timelines).
+  "role": "start" | "end" | "normal",
+
+  // OPTIONAL coarse size hints – the client uses them only as rough hints.
+  // Values in [0,1] relative to the AI Region.
+  "w": 0.2,
+  "h": 0.15
 }}
 
 Rules:
 - LABELS MUST BE SHORT: 1–6 words, no line breaks, no paragraphs.
-- Avoid redundancy. Summarize long ideas into a few concise blocks.
-- 0 <= x,y,w,h <= 1.
+- 0 <= w,h <= 1 if you provide them; they are just hints.
 - "text" is a heading; "paragraph" is smaller explanatory text.
-- Emit AT MOST {MAX_BLOCKS} add_block operations. Prefer 3–7 if possible.
+- Use "lane" to create multiple timelines:
+  - lane 0 = first timeline,
+  - lane 1 = second timeline, etc.
+- Within each lane, you can indicate the first and last node using
+  "role": "start" and "role": "end" (otherwise omit or use "normal").
+- Emit AT MOST {MAX_BLOCKS} add_block operations. Prefer 3–12.
 
-2) Add an arrow between two blocks
------------------------------------
+2) Add an arrow between two nodes
+----------------------------------
 
-Indexes refer to the ORDER in which you emit add_block operations (starting at 0).
+Indexes refer to the ORDER of add_block operations (0-based):
 
 {{
   "op": "add_arrow",
@@ -286,12 +304,13 @@ Indexes refer to the ORDER in which you emit add_block operations (starting at 0
 
 Rules:
 - Only use indices that correspond to existing add_block operations.
-- Show essential relationships only (sequence, cause/effect, data flow).
+- Arrows show flow or dependencies (e.g. timeline, cause/effect).
+- It is valid to connect nodes across lanes (e.g. handoff between timelines).
 - Hard limit: AT MOST {MAX_ARROWS} arrows.
 - Prefer a minimal, readable graph, not a dense tangle.
 
-3) Add a decorative stroke around a block
------------------------------------------
+3) Add a decorative stroke around a node
+----------------------------------------
 
 {{
   "op": "add_stroke",
@@ -301,14 +320,12 @@ Rules:
   "width": 3
 }}
 
-Rules:
-- Use sparingly to emphasize key blocks.
-- At most {MAX_STROKES} add_stroke operations.
+Use sparingly (<= {MAX_STROKES}) to emphasize especially important nodes.
 
 4) Add a symbolic shape (circle / ellipse / rect / line)
 --------------------------------------------------------
 
-Coordinates are normalized to the inner AI Region ([0,1]).
+Coordinates are normalized to the inner AI Region ([0,1]):
 
 {{
   "op": "add_shape",
@@ -330,11 +347,6 @@ Coordinates are normalized to the inner AI Region ([0,1]).
   "strokeWidth": 2
 }}
 
-Rules:
-- All coordinates MUST be between 0 and 1.
-- Use a small number of shapes (<= {MAX_SHAPES}) to keep drawings clean.
-- Rectangles for boxes, circles/ellipses for icons or heads, lines for legs/axes/etc.
-
 5) Add a freehand stroke path
 ------------------------------
 
@@ -351,17 +363,16 @@ Rules:
 
 Rules:
 - u, v in [0,1] inside the region.
-- Use BETWEEN 30 AND 200 points for a visible organic stroke.
+- Use BETWEEN 30 AND 200 points for a visible stroke.
 - Keep strokes inside 0.05 <= u,v <= 0.95.
 - Use at most {MAX_STROKE_PATHS} stroke paths.
 
 General style rules
 -------------------
-- Think like a diagrammer: decide WHAT to draw, not how it looks.
+- Think like a graph drawer: define nodes and edges in a few parallel timelines.
 - Prefer:
-  - A few concise blocks with very short labels.
+  - Several concise nodes across one or more lanes (timelines).
   - A limited number of arrows showing the main flow.
-- Do NOT output paragraphs as labels; keep them short summary phrases.
 - Never output anything except a valid JSON object with an "operations" array.
 """
 
