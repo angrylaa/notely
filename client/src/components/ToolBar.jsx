@@ -1,10 +1,12 @@
-// src/components/ToolBar.js
+// src/components/ToolBar.jsx
 import { useCamera } from "../context/CameraContext";
 
 export default function ToolBar({
   selectedId,
   onDeleteSelected,
   onClearBoard,
+  onExport,
+  onImport,
 }) {
   const { camera, setCamera } = useCamera();
 
@@ -67,8 +69,18 @@ export default function ToolBar({
       >
         Delete
       </button>
+
       <button onClick={onClearBoard} style={{ ...buttonBase, marginLeft: 8 }}>
         Clear board
+      </button>
+
+      {/* NEW: Export / Import buttons */}
+      <button onClick={onExport} style={{ ...buttonBase, marginLeft: 8 }}>
+        Export
+      </button>
+
+      <button onClick={onImport} style={{ ...buttonBase, marginLeft: 4 }}>
+        Import
       </button>
     </div>
   );

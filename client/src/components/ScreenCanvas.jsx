@@ -3,7 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import starterImgSrc from "../assets/starter.png";
 import { useCamera } from "../context/CameraContext";
 
+const GRID_SIZE = 24;
+
 // ---------- Helpers ----------
+
+// grid snapping for world coords
+const snapToGrid = (v, grid = GRID_SIZE) => Math.round(v / grid) * grid;
 
 // screen -> world
 function screenToWorld(sx, sy, camera, viewportWidth, viewportHeight) {
@@ -13,7 +18,7 @@ function screenToWorld(sx, sy, camera, viewportWidth, viewportHeight) {
 }
 
 // world -> screen
-function worldToScreen(wx, wy, camera, viewportWidth, viewportHeight) {
+export function worldToScreen(wx, wy, camera, viewportWidth, viewportHeight) {
   const sx = (wx - camera.x) * camera.zoom + viewportWidth / 2;
   const sy = (wy - camera.y) * camera.zoom + viewportHeight / 2;
   return { sx, sy };
@@ -41,8 +46,8 @@ function stripLatexDelimiters(label = "") {
   return label;
 }
 
-// word-wrap a string into multiple lines that fit within maxWidth (in px)
-function wrapText(ctx, text, maxWidthPx) {
+// word-wrap a string into multiple lines that fit within maxWidth (in world units)
+function wrapText(ctx, text, maxWidth) {
   if (!text) return [""];
   const words = text.split(/\s+/);
   const lines = [];
@@ -51,7 +56,7 @@ function wrapText(ctx, text, maxWidthPx) {
   for (const word of words) {
     const testLine = currentLine ? currentLine + " " + word : word;
     const { width } = ctx.measureText(testLine);
-    if (width > maxWidthPx && currentLine) {
+    if (width > maxWidth && currentLine) {
       lines.push(currentLine);
       currentLine = word;
     } else {
@@ -127,7 +132,7 @@ function hitTestElement(el, wx, wy) {
     return dist2 <= margin * margin;
   }
 
-  // box / latex / text / paragraph
+  // box / latex / text / paragraph / aiRegion
   return wx >= el.x && wx <= el.x + el.w && wy >= el.y && wy <= el.y + el.h;
 }
 
@@ -179,7 +184,7 @@ function withArrowBounds(el) {
 
 // ---------- SNAP HELPERS ----------
 
-// all snap points for a box/latex
+// all snap points for a box/latex/etc.
 function getBoxSnapPoints(el) {
   const x = el.x;
   const y = el.y;
@@ -315,20 +320,21 @@ export default function ScreenCanvas({
     // background image in world space
     if (starterImage) {
       const imgW = 800;
-      const imgH = 600;
+      const imgH = 800;
       const imgX = -imgW / 2;
       const imgY = -imgH / 2;
       ctx.drawImage(starterImage, imgX, imgY, imgW, imgH);
     }
 
-    // components
-    ctx.font = `${16 / camera.zoom}px "angela", system-ui, sans-serif`;
+    // base font (world units, zoom will scale it visually)
+    ctx.font = `16px "angela", system-ui, sans-serif`;
 
     elements.forEach((rawEl) => {
       const el = rawEl.type === "arrow" ? withArrowBounds(rawEl) : rawEl;
       const isSelected = el.id === selectedId;
       const type = el.type || "box";
 
+      // ---------- ARROWS ----------
       if (type === "arrow") {
         const x1 = el.x1 ?? el.x;
         const y1 = el.y1 ?? el.y;
@@ -336,7 +342,7 @@ export default function ScreenCanvas({
         const y2 = el.y2 ?? el.y + el.h;
 
         ctx.strokeStyle = isSelected ? "#facc15" : "#e5e7eb";
-        ctx.lineWidth = 2 / camera.zoom;
+        ctx.lineWidth = 2;
 
         // arrow line
         ctx.beginPath();
@@ -362,10 +368,10 @@ export default function ScreenCanvas({
 
         // endpoint handles if selected
         if (isSelected) {
-          const r = 6 / camera.zoom;
+          const r = 6;
           ctx.fillStyle = "#f97316";
           ctx.strokeStyle = "#0f172a";
-          ctx.lineWidth = 1 / camera.zoom;
+          ctx.lineWidth = 1;
 
           ctx.beginPath();
           ctx.arc(x1, y1, r, 0, Math.PI * 2);
@@ -380,17 +386,36 @@ export default function ScreenCanvas({
         return;
       }
 
-      // ----- non-arrow: box / latex / text / paragraph -----
+      // ---------- NON-ARROWS ----------
       const isLatex = type === "latex";
       const isHeading = type === "text";
       const isParagraph = type === "paragraph";
       const isPlainBox = type === "box";
+      const isAiRegion = type === "aiRegion";
 
-      // LaTeX: keep rounded box + clipping
+      // 1) AI Region: dashed yellow frame + tiny label
+      if (isAiRegion) {
+        ctx.save();
+        ctx.setLineDash([6, 6]);
+        ctx.strokeStyle = "#facc15";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(el.x, el.y, el.w, el.h);
+        ctx.restore();
+
+        ctx.fillStyle = "#e5e7eb";
+        ctx.font = `12px "angela", system-ui, sans-serif`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText(el.label || "AI Region", el.x + 6, el.y + 4);
+
+        return;
+      }
+
+      // 2) LaTeX block: rounded box + wrapped text
       if (isLatex) {
         ctx.fillStyle = "#020617";
         ctx.strokeStyle = isSelected ? "#facc15" : "#4b5563";
-        ctx.lineWidth = 2 / camera.zoom;
+        ctx.lineWidth = 2;
 
         roundedRectPath(ctx, el.x, el.y, el.w, el.h, 12);
         ctx.fill();
@@ -406,18 +431,15 @@ export default function ScreenCanvas({
 
         let text = stripLatexDelimiters(el.label || "") || "LaTeX";
 
-        const paddingPx = 16;
-        const availableWidthPx = Math.max(
-          0,
-          el.w * camera.zoom - paddingPx * 2
-        );
+        const paddingWorld = 16;
+        const availableWidth = Math.max(0, el.w - paddingWorld * 2);
         const lineHeight = baseFontSize + 4;
 
         let lines = [text];
-        if (availableWidthPx > 0 && text) {
+        if (availableWidth > 0 && text) {
           const paragraphs = text.split("\n");
           lines = paragraphs.flatMap((para) =>
-            wrapText(ctx, para, availableWidthPx)
+            wrapText(ctx, para, availableWidth)
           );
         }
 
@@ -437,15 +459,14 @@ export default function ScreenCanvas({
 
         ctx.restore();
 
-        // selection handle
         if (isSelected) {
-          const handleSize = 7 / camera.zoom;
+          const handleSize = 7;
           const hx = el.x + el.w;
           const hy = el.y + el.h;
 
           ctx.fillStyle = "#facc15";
           ctx.strokeStyle = "#0f172a";
-          ctx.lineWidth = 1 / camera.zoom;
+          ctx.lineWidth = 1;
 
           ctx.beginPath();
           ctx.rect(
@@ -461,9 +482,9 @@ export default function ScreenCanvas({
         return;
       }
 
-      // Text-based blocks: box / paragraph / heading
+      // 3) Text-based blocks: heading / paragraph / plain box
       let baseFontSize = 16;
-      if (isHeading) baseFontSize = 32; // 🔥 make header bigger
+      if (isHeading) baseFontSize = 32;
       if (isParagraph) baseFontSize = 16;
       if (isPlainBox) baseFontSize = 16;
 
@@ -477,8 +498,15 @@ export default function ScreenCanvas({
       let text = el.label || "";
       const lineHeight = baseFontSize + 4;
 
-      // ❌ no automatic word-wrap; just respect manual "\n"
-      const lines = text.split("\n");
+      const availableWidth = Math.max(0, el.w - paddingWorld * 2);
+
+      let lines = [text];
+      if (availableWidth > 0 && text) {
+        const paragraphs = text.split("\n");
+        lines = paragraphs.flatMap((para) =>
+          wrapText(ctx, para, availableWidth)
+        );
+      }
 
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
@@ -488,17 +516,18 @@ export default function ScreenCanvas({
         ctx.fillText(line, startX, y);
       });
 
-      // draw a dashed selection rectangle ONLY when selected
+      // dashed selection rectangle ONLY when selected
       if (isSelected) {
         ctx.save();
-        ctx.setLineDash([4 / camera.zoom, 4 / camera.zoom]);
+        ctx.setLineDash([4, 4]);
         ctx.strokeStyle = "#facc15";
-        ctx.lineWidth = 1.5 / camera.zoom;
+        ctx.lineWidth = 1.5;
         ctx.strokeRect(el.x, el.y, el.w, el.h);
         ctx.restore();
       }
     });
 
+    // strokes
     // strokes
     if (strokes && strokes.length > 0) {
       ctx.lineCap = "round";
@@ -508,10 +537,15 @@ export default function ScreenCanvas({
         if (!stroke.points || stroke.points.length < 2) return;
 
         const color = stroke.color || "#e5e7eb";
-        const widthWorld = stroke.width || 2;
+
+        // Treat stroke.width as *screen* pixels.
+        // Since the context is already scaled by camera.zoom,
+        // we divide by zoom so that the visible width is constant.
+        const widthScreen = stroke.width || 2;
+        const effectiveWorldWidth = widthScreen / (camera.zoom || 1);
 
         ctx.strokeStyle = color;
-        ctx.lineWidth = widthWorld / camera.zoom;
+        ctx.lineWidth = effectiveWorldWidth;
 
         ctx.beginPath();
         const [first, ...rest] = stroke.points;
@@ -714,8 +748,8 @@ export default function ScreenCanvas({
 
       // snap this endpoint to nearest box anchor if close enough
       const snapped = snapPointToBoxes(wx, wy, elements, id, 20);
-      const sxp = snapped.x;
-      const syp = snapped.y;
+      const sxp = snapToGrid(snapped.x);
+      const syp = snapToGrid(snapped.y, GRID_SIZE * 2);
 
       setElements((prev) =>
         prev.map((el) => {
@@ -744,8 +778,11 @@ export default function ScreenCanvas({
       const state = dragState.current;
       if (state.kind === "box") {
         const { id, offsetX, offsetY } = state;
-        const newX = wx - offsetX;
-        const newY = wy - offsetY;
+        let newX = wx - offsetX;
+        let newY = wy - offsetY;
+
+        newX = snapToGrid(newX);
+        newY = snapToGrid(newY);
 
         setElements((prev) =>
           prev.map((el) => (el.id === id ? { ...el, x: newX, y: newY } : el))
@@ -756,10 +793,10 @@ export default function ScreenCanvas({
         const dx = wx - startWx;
         const dy = wy - startWy;
 
-        let x1 = startX1 + dx;
-        let y1 = startY1 + dy;
-        let x2 = startX2 + dx;
-        let y2 = startY2 + dy;
+        let x1 = snapToGrid(startX1 + dx);
+        let y1 = snapToGrid(startY1 + dy, GRID_SIZE * 2);
+        let x2 = snapToGrid(startX2 + dx);
+        let y2 = snapToGrid(startY2 + dy, GRID_SIZE * 2);
 
         setElements((prev) =>
           prev.map((el) =>
@@ -849,10 +886,11 @@ export default function ScreenCanvas({
 
       if (key === "arrow") {
         const half = (w || 160) / 2;
-        const x1 = wx - half;
-        const y1 = wy;
-        const x2 = wx + half;
-        const y2 = wy;
+        const laneY = snapToGrid(wy, GRID_SIZE * 2);
+        const x1 = snapToGrid(wx - half);
+        const y1 = laneY;
+        const x2 = snapToGrid(wx + half);
+        const y2 = laneY;
 
         const minX = Math.min(x1, x2);
         const maxX = Math.max(x1, x2);
@@ -871,6 +909,18 @@ export default function ScreenCanvas({
           x2,
           y2,
         };
+      } else if (key === "aiRegion") {
+        const x = snapToGrid(wx - w / 2);
+        const y = snapToGrid(wy - h / 2);
+        newElement = {
+          id,
+          x,
+          y,
+          w,
+          h,
+          label: label || "AI Region",
+          type: "aiRegion",
+        };
       } else {
         // choose default label per block type
         let defaultLabel;
@@ -888,10 +938,13 @@ export default function ScreenCanvas({
             defaultLabel = label || "Text";
         }
 
+        const x = snapToGrid(wx - w / 2);
+        const y = snapToGrid(wy - h / 2);
+
         newElement = {
           id,
-          x: wx - w / 2,
-          y: wy - h / 2,
+          x,
+          y,
           w,
           h,
           label: defaultLabel,
@@ -901,9 +954,7 @@ export default function ScreenCanvas({
 
       setElements((prev) => [...prev, newElement]);
       setSelectedId(id);
-
-      // auto-deselect template after one placement
-      setPendingTemplate(null);
+      setPendingTemplate(null); // auto-deselect template after placement
       return;
     }
 
@@ -957,8 +1008,11 @@ export default function ScreenCanvas({
 
   // ---------- wheel zoom ----------
 
+  // ---------- wheel zoom ----------
+
   const handleWheel = (e) => {
-    e.preventDefault();
+    // Don't call preventDefault here; Chrome treats some wheel listeners as passive
+    // and will log a warning if we try to prevent default behavior.
 
     const canvas = canvasRef.current;
     if (!canvas) return;

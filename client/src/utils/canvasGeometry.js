@@ -199,25 +199,3 @@ export function snapPointToBoxes(wx, wy, elements, selfId, threshold = 20) {
   if (best) return best;
   return { x: wx, y: wy };
 }
-
-// src/utils/persistence.js
-const STORAGE_KEY = "canvas-board-v1";
-
-export function saveBoardState(state) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch (err) {
-    console.error("Failed to save board state", err);
-  }
-}
-
-export function loadBoardState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch (err) {
-    console.error("Failed to load board state", err);
-    return null;
-  }
-}

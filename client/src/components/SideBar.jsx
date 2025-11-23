@@ -12,8 +12,8 @@ export default function SideBar({
   setStrokeWidth,
   elements,
   setElements, // still here if you need it later
-  pendingTemplate, // 👈 new
-  setPendingTemplate, // 👈 new
+  pendingTemplate,
+  setPendingTemplate,
 }) {
   const { camera, setCamera } = useCamera();
 
@@ -54,11 +54,16 @@ export default function SideBar({
   // === stroke settings ===
   const strokeColors = [
     "#e5e7eb",
-    "#f97316",
-    "#22c55e",
-    "#3b82f6",
-    "#a855f7",
-    "#ef4444",
+    "#ffadad",
+    "#ffd6a5",
+    "#fdffb6",
+    "#caffbf",
+    "#9bf6ff",
+    "#a0c4ff",
+    "#bdb2ff",
+    "#ffc6ff",
+    "#d6cbbe",
+    "#000000",
   ];
   const strokeWidths = [1, 2, 4, 8];
 
@@ -69,6 +74,7 @@ export default function SideBar({
     { key: "box", label: "Box", w: 180, h: 100 },
     { key: "text", label: "Heading", w: 320, h: 80 },
     { key: "paragraph", label: "Paragraph", w: 360, h: 120 },
+    { key: "aiRegion", label: "AI Region", w: 480, h: 480 },
   ];
 
   const selectTemplate = (tpl) => {
