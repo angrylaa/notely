@@ -1,8 +1,9 @@
 // src/components/AiPanel.jsx
 import { useCallback, useState } from "react";
-import { getBoxSnapPoints } from "../utils/canvasGeometry";
 
 const AI_STROKE_COLOR = "#ffffff"; // ✅ all AI strokes are white
+const MIN_ARROW_GAP = 100; // ✅ min arrow length & block spacing
+const SIDE_PADDING = 32;
 
 function makeId() {
   return (
@@ -12,152 +13,205 @@ function makeId() {
 }
 
 /**
- * Measure a label's width in "world" pixels using a hidden canvas.
- * We use a bigger font for headings ("text") and smaller for paragraphs/box.
+ * Roughly estimate the block size based on label length so
+ * the width is only as wide as the text needs.
  */
-function measureLabelWidth(label, blockType) {
-  if (!label) label = "";
-  const canvas =
-    measureLabelWidth._canvas ||
-    (measureLabelWidth._canvas = document.createElement("canvas"));
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    // fallback: rough estimate
-    return label.length * (blockType === "text" ? 18 : 9);
-  }
+function estimateBlockSize(label, blockType, region) {
+  const text =
+    (typeof label === "string" ? label.trim() : "") ||
+    (blockType === "text" ? "Heading" : "Text");
 
-  const fontSize = blockType === "text" ? 32 : 16;
-  ctx.font = `${fontSize}px "angela", system-ui, sans-serif`;
-  const metrics = ctx.measureText(label);
-  return metrics.width || label.length * (blockType === "text" ? 18 : 9);
+  const approxCharWidth = 10; // heuristic
+  const basePadding = 32; // left + right
+  const minWidth = 140;
+  const maxWidth = Math.max(minWidth, region.w * 0.8);
+
+  const rawWidth = text.length * approxCharWidth + basePadding;
+  let w = Math.max(minWidth, Math.min(maxWidth, rawWidth));
+
+  // estimate lines / height
+  const charsPerLine = Math.max(12, Math.floor(w / approxCharWidth));
+  const lines = Math.max(1, Math.ceil(text.length / charsPerLine));
+  const lineHeight = blockType === "text" ? 28 : 22;
+  const baseHeight = blockType === "text" ? 40 : 32;
+  const h = baseHeight + (lines - 1) * lineHeight;
+
+  return { w, h };
 }
 
 /**
- * Lay out blocks in rows inside aiRegion so they NEVER overlap.
- * Width is based on text size + padding, not on Gemini's w.
+ * Lay out blocks in a single row or column with at least MIN_ARROW_GAP
+ * between them. We choose vertical layout if the region is too narrow.
+ *
+ * Returns { placed, orientation }
+ *  - placed: [{ index, op, x, y, w, h, blockType }]
+ *  - orientation: "horizontal" | "vertical"
  */
 function layoutBlocksInRegion(blockOps, region) {
-  const paddingOuter = 24; // padding from region border
-  const gapX = 24;
-  const gapY = 24;
+  const innerWidth = region.w - SIDE_PADDING * 2;
+  const innerHeight = region.h - SIDE_PADDING * 2;
 
-  const regionInnerLeft = region.x + paddingOuter;
-  const regionInnerTop = region.y + paddingOuter;
-  const regionInnerRight = region.x + region.w - paddingOuter;
+  const prepared = blockOps.map((op, index) => {
+    const blockType = op.blockType === "text" ? "text" : "paragraph";
+    const { w, h } = estimateBlockSize(op.label, blockType, region);
+    return { index, op, blockType, w, h };
+  });
 
-  const minWidth = 80; // tiny safety so boxes aren't microscopic
-  const minHeight = 40;
+  const n = prepared.length;
+  if (n === 0) {
+    return { placed: [], orientation: "horizontal" };
+  }
 
-  let cursorX = regionInnerLeft;
-  let cursorY = regionInnerTop;
-  let rowHeight = 0;
+  const totalWidthNeeded =
+    prepared.reduce((sum, b) => sum + b.w, 0) + MIN_ARROW_GAP * (n - 1);
+  const totalHeightNeeded =
+    prepared.reduce((sum, b) => sum + b.h, 0) + MIN_ARROW_GAP * (n - 1);
+
+  let orientation;
+  if (totalWidthNeeded <= innerWidth) {
+    // fits horizontally
+    orientation = "horizontal";
+  } else if (totalHeightNeeded <= innerHeight) {
+    // doesn't fit horizontally, but fits vertically
+    orientation = "vertical";
+  } else {
+    // neither fits perfectly; pick whichever dimension is larger
+    orientation = innerWidth >= innerHeight ? "horizontal" : "vertical";
+  }
 
   const placed = [];
 
-  blockOps.forEach((op, index) => {
-    // determine block type
-    let type;
-    if (op.blockType === "text") type = "text";
-    else if (op.blockType === "paragraph") type = "paragraph";
-    else type = "box";
+  if (orientation === "horizontal") {
+    const centerY = region.y + region.h / 2;
+    let x = region.x + SIDE_PADDING;
 
-    // determine label (same defaults we use when creating elements)
-    let label = typeof op.label === "string" ? op.label.trim() : "";
-    if (!label) {
-      if (type === "latex") label = "$$x^2 + y^2$$";
-      else if (type === "text") label = "Heading";
-      else if (type === "paragraph") label = "Type your paragraph…";
-      else label = "Text";
-    }
-
-    // choose font + padding
-    const isHeading = type === "text";
-    const fontSize = isHeading ? 32 : 16;
-    const lineHeight = fontSize + 4;
-    const paddingInner = isHeading ? 16 : 10;
-
-    // measure text width and build box width/height
-    const textWidth = measureLabelWidth(label, type);
-    let w = textWidth + paddingInner * 2;
-    let h = lineHeight + paddingInner * 2;
-
-    // clamp width/height to region
-    const maxW = region.w * 0.9;
-    if (w > maxW) w = maxW;
-    if (w < minWidth) w = minWidth;
-    if (h < minHeight) h = minHeight;
-
-    // wrap to next row if necessary
-    if (cursorX + w > regionInnerRight) {
-      cursorX = regionInnerLeft;
-      cursorY += rowHeight + gapY;
-      rowHeight = 0;
-    }
-
-    placed.push({
-      index, // index in blockOps
-      op,
-      x: cursorX,
-      y: cursorY,
-      w,
-      h,
-      type,
-      label,
+    prepared.forEach((b) => {
+      const y = centerY - b.h / 2;
+      placed.push({
+        index: b.index,
+        op: b.op,
+        blockType: b.blockType,
+        x,
+        y,
+        w: b.w,
+        h: b.h,
+      });
+      x += b.w + MIN_ARROW_GAP;
     });
+  } else {
+    const centerX = region.x + region.w / 2;
+    let y = region.y + SIDE_PADDING;
 
-    cursorX += w + gapX;
-    rowHeight = Math.max(rowHeight, h);
-  });
+    prepared.forEach((b) => {
+      const x = centerX - b.w / 2;
+      placed.push({
+        index: b.index,
+        op: b.op,
+        blockType: b.blockType,
+        x,
+        y,
+        w: b.w,
+        h: b.h,
+      });
+      y += b.h + MIN_ARROW_GAP;
+    });
+  }
 
-  // This row layout guarantees NO OVERLAP because each block gets its own slot.
-  return placed;
+  return { placed, orientation };
 }
 
 /**
- * Compute arrow endpoints based on block geometry using getBoxSnapPoints.
- * We pick the closest pair of snap points between the two blocks.
+ * Build an arrow element between two blocks.
+ * - Horizontal: centers on Y, at least MIN_ARROW_GAP long.
+ * - Vertical:   centers on X, at least MIN_ARROW_GAP long.
  */
-function computeArrowEndpoints(fromEl, toEl) {
-  const fromPoints = getBoxSnapPoints(fromEl);
-  const toPoints = getBoxSnapPoints(toEl);
+function buildArrowElement(fromEl, toEl, orientation) {
+  if (!fromEl || !toEl) return null;
 
-  let bestFrom = fromPoints[0];
-  let bestTo = toPoints[0];
-  let bestDist2 = Infinity;
+  const fromCx = fromEl.x + fromEl.w / 2;
+  const fromCy = fromEl.y + fromEl.h / 2;
+  const toCx = toEl.x + toEl.w / 2;
+  const toCy = toEl.y + toEl.h / 2;
 
-  fromPoints.forEach((fp) => {
-    toPoints.forEach((tp) => {
-      const dx = fp.x - tp.x;
-      const dy = fp.y - tp.y;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < bestDist2) {
-        bestDist2 = d2;
-        bestFrom = fp;
-        bestTo = tp;
-      }
-    });
-  });
+  if (orientation === "vertical") {
+    // Center X, arrow running up/down
+    const dir = toCy >= fromCy ? 1 : -1; // down or up
+    const centerX = (fromCx + toCx) / 2;
 
-  const x1 = bestFrom.x;
-  const y1 = bestFrom.y;
-  const x2 = bestTo.x;
-  const y2 = bestTo.y;
+    const rawStartY = dir > 0 ? fromEl.y + fromEl.h : fromEl.y;
+    const rawEndY = dir > 0 ? toEl.y : toEl.y + toEl.h;
 
-  const minX = Math.min(x1, x2);
-  const maxX = Math.max(x1, x2);
-  const minY = Math.min(y1, y2);
-  const maxY = Math.max(y1, y2);
+    let y1 = rawStartY + dir * 8; // a bit away from the box edge
+    let y2 = rawEndY - dir * 8;
 
-  return {
-    x1,
-    y1,
-    x2,
-    y2,
-    x: minX,
-    y: minY,
-    w: maxX - minX,
-    h: maxY - minY,
-  };
+    let length = Math.abs(y2 - y1);
+    if (length < MIN_ARROW_GAP) {
+      const extra = (MIN_ARROW_GAP - length) / 2;
+      y1 -= dir * extra;
+      y2 += dir * extra;
+      length = Math.abs(y2 - y1);
+    }
+
+    const x1 = centerX;
+    const x2 = centerX;
+
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+
+    return {
+      id: makeId(),
+      type: "arrow",
+      x: minX,
+      y: minY,
+      w: maxX - minX,
+      h: maxY - minY,
+      x1,
+      y1,
+      x2,
+      y2,
+    };
+  } else {
+    // Horizontal: center Y, arrow running left/right
+    const dir = toCx >= fromCx ? 1 : -1; // right or left
+    const centerY = (fromCy + toCy) / 2;
+
+    const rawStartX = dir > 0 ? fromEl.x + fromEl.w : fromEl.x;
+    const rawEndX = dir > 0 ? toEl.x : toEl.x + toEl.w;
+
+    let x1 = rawStartX + dir * 8;
+    let x2 = rawEndX - dir * 8;
+
+    let length = Math.abs(x2 - x1);
+    if (length < MIN_ARROW_GAP) {
+      const extra = (MIN_ARROW_GAP - length) / 2;
+      x1 -= dir * extra;
+      x2 += dir * extra;
+      length = Math.abs(x2 - x1);
+    }
+
+    const y1 = centerY;
+    const y2 = centerY;
+
+    const minX = Math.min(x1, x2);
+    const maxX = Math.max(x1, x2);
+    const minY = Math.min(y1, y2);
+    const maxY = Math.max(y1, y2);
+
+    return {
+      id: makeId(),
+      type: "arrow",
+      x: minX,
+      y: minY,
+      w: maxX - minX,
+      h: maxY - minY,
+      x1,
+      y1,
+      x2,
+      y2,
+    };
+  }
 }
 
 /**
@@ -225,14 +279,27 @@ export default function AiPanel({
       const strokePathOps = operations.filter(
         (op) => op && op.op === "add_stroke_path"
       );
-      // (You can also handle add_shape / add_stroke here if you want)
 
-      // 3) layout blocks inside aiRegion with NO OVERLAP, width from text
-      const laidOut = layoutBlocksInRegion(blockOps, aiRegion);
+      // 3) layout blocks inside aiRegion with NO OVERLAP, respecting MIN_ARROW_GAP
+      const { placed, orientation } = layoutBlocksInRegion(blockOps, aiRegion);
 
-      const newBlockElements = laidOut.map(
-        ({ index, op, x, y, w, h, type, label }) => {
+      const newBlockElements = placed.map(
+        ({ index, op, x, y, w, h, blockType }) => {
           const id = makeId();
+
+          let type;
+          if (blockType === "text") type = "text";
+          else if (blockType === "paragraph") type = "paragraph";
+          else type = "box";
+
+          let label = typeof op.label === "string" ? op.label.trim() : "";
+          if (!label) {
+            if (type === "latex") label = "$$x^2 + y^2$$";
+            else if (type === "text") label = "Heading";
+            else if (type === "paragraph") label = "Type your paragraph…";
+            else label = "Text";
+          }
+
           return {
             id,
             blockIndex: index, // index in blockOps array
@@ -250,7 +317,7 @@ export default function AiPanel({
       const findBlockByIndex = (idx) =>
         newBlockElements.find((el) => el.blockIndex === idx);
 
-      // 4) build arrows from block indices (using snap points)
+      // 4) build arrows from block indices, using layout orientation
       const newArrowElements = arrowOps
         .map((op) => {
           const fromIdx = op.from;
@@ -263,20 +330,7 @@ export default function AiPanel({
           const toEl = findBlockByIndex(toIdx);
           if (!fromEl || !toEl) return null;
 
-          const ends = computeArrowEndpoints(fromEl, toEl);
-
-          return {
-            id: makeId(),
-            type: "arrow",
-            x: ends.x,
-            y: ends.y,
-            w: ends.w,
-            h: ends.h,
-            x1: ends.x1,
-            y1: ends.y1,
-            x2: ends.x2,
-            y2: ends.y2,
-          };
+          return buildArrowElement(fromEl, toEl, orientation);
         })
         .filter(Boolean);
 
@@ -316,7 +370,6 @@ export default function AiPanel({
     }
   }, [elements, selectedId, prompt, setElements, setStrokes]);
 
-  // 🔽 This is your original styling + tip block
   return (
     <div
       style={{

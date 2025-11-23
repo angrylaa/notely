@@ -488,8 +488,18 @@ export default function ScreenCanvas({
       if (isParagraph) baseFontSize = 16;
       if (isPlainBox) baseFontSize = 16;
 
+      // 🔲 Draw box outline/background for plain "box" elements
+      if (isPlainBox) {
+        ctx.fillStyle = "#020617";
+        ctx.strokeStyle = isSelected ? "#facc15" : "#4b5563";
+        ctx.lineWidth = 2;
+        roundedRectPath(ctx, el.x, el.y, el.w, el.h, 12);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#e5e7eb"; // text color
+      }
+
       ctx.font = `${baseFontSize}px "angela", system-ui, sans-serif`;
-      ctx.fillStyle = "#e5e7eb";
 
       const paddingWorld = 8;
       const startX = el.x + paddingWorld;
